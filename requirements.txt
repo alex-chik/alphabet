@@ -1,0 +1,5 @@
+vectorbt
+streamlit
+pandas
+plotly
+pytz
