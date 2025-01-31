@@ -4,100 +4,58 @@ import pandas as pd
 import pytz
 import plotly.graph_objs as go
 from datetime import datetime, date
+from typing import Tuple, Optional
 
-charts = st.empty()
+# Constants
+DEFAULT_TICKER = "NFLX"
+DEFAULT_START_DATE = date(2008, 1, 1)
+DEFAULT_END_DATE = date(2008, 12, 31)
+DEFAULT_INITIAL_EQUITY = 100000
+DEFAULT_POSITION_SIZE = "50"
+DEFAULT_FEES = 0.12
 
-# Convert date to timezone-aware datetime
-def convert_to_timezone_aware(date_obj):
+STRATEGIES = {
+    "SMA (50 & 200)": {"type": "SMA"},
+    "EMA (50 & 200)": {"type": "EMA"},
+    "RSI (70)": {"type": "RSI"},
+}
+
+def convert_to_timezone_aware(date_obj: date) -> datetime:
+    """Convert date to timezone-aware datetime."""
     return datetime.combine(date_obj, datetime.min.time()).astimezone(pytz.UTC)
 
-# Initialize session state for first run
-if "data_fetched" not in st.session_state:
-    st.session_state.data_fetched = False
-
-with st.sidebar:
-    st.header("Historical")
-
-    ticker = st.text_input("Ticker", value="NFLX")
-    start_date = st.date_input("Start Date", value=date(2008, 1, 1))
-    end_date = st.date_input("End Date", value=date(2008, 12, 31))
-
-    # Button to manually refresh data
-    historical_clicked = st.button("Get Historical")
-
-    st.header("Backtest")
-
-    # Backtesting controls
-    strategies = {
-        "SMA (50 & 200)": {"type": "SMA"},
-        "EMA (50 & 200)": {"type": "EMA"},
-        "RSI (70)": {"type": "RSI"},
-    }
-
-    # User selects a strategy
-    selected_label = st.selectbox("Strategy", list(strategies.keys()), index=2)
-
-    # Get corresponding internal values
-    strategy = strategies[selected_label]["type"]
-    initial_equity = st.number_input("Initial Equity", value=100000)
-    size = st.text_input("Position %", value='50')
-    fees = st.number_input("Fees (as %)", value=0.12, format="%.4f")
-
-    # Button to perform backtesting
-    backtest_clicked = st.button("Run Backtest")
-
-# Run once on startup or when button is clicked
-if not st.session_state.data_fetched or historical_clicked:
-    try:     
-        start_date_tz = convert_to_timezone_aware(start_date)
-        end_date_tz = convert_to_timezone_aware(end_date)
-
-        # Fetch SPY data
-        spy_data = vbt.YFData.download("SPY", start=start_date_tz, end=end_date_tz).get('Close')
-        if spy_data is None or spy_data.empty:
-            st.error("Failed to fetch SPY data. Please check the date range.")
-            st.stop()
-        
-        spy_data = spy_data / spy_data.iloc[0] * 100  # Normalize
-
-        # Fetch ticker data
-        data = vbt.YFData.download(ticker, start=start_date_tz, end=end_date_tz).get('Close')
+@st.cache_data
+def fetch_historical_data(ticker: str, start_date: datetime, end_date: datetime) -> Optional[pd.Series]:
+    """Fetch and validate historical price data."""
+    try:
+        data = vbt.YFData.download(ticker, start=start_date, end=end_date).get('Close')
         if data is None or data.empty:
-            st.error(f"Failed to fetch data for {ticker}. Please check the ticker symbol.")
-            st.stop()
-
-        data = data / data.iloc[0] * 100  # Normalize
-
-        # Store data in session state
-        st.session_state.data_fetched = True
-
-        # Plotly Figure
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=spy_data.index, y=spy_data.values, mode='lines', name="SPY"))
-        fig.add_trace(go.Scatter(x=data.index, y=data.values, mode='lines', name=ticker))
-
-        fig.update_layout(title=f"{ticker} vs SPY Normalized Stock Price", 
-                          xaxis_title="Date", 
-                          yaxis_title="Normalized Price")
-  
-        st.plotly_chart(fig, use_container_width=True)
-
+            st.error(f"No data available for {ticker}")
+            return None
+        return data
     except Exception as e:
-        st.error(f"An error occurred: {e}")
+        st.error(f"Error fetching data for {ticker}: {e}")
+        return None
 
-# Run backtest when button is clicked
-if backtest_clicked:
+def normalize_price_data(data: pd.Series) -> pd.Series:
+    """Normalize price data to start at 100."""
+    return data / data.iloc[0] * 100
+
+def plot_price_comparison(ticker_data: pd.Series, spy_data: pd.Series, ticker: str) -> go.Figure:
+    """Create price comparison chart."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=spy_data.index, y=spy_data.values, mode='lines', name="SPY"))
+    fig.add_trace(go.Scatter(x=ticker_data.index, y=ticker_data.values, mode='lines', name=ticker))
     
-    short, long, entries, exits = None, None, None, None
-    start_date_tz = convert_to_timezone_aware(start_date)
-    end_date_tz = convert_to_timezone_aware(end_date)
+    fig.update_layout(
+        title=f"{ticker} vs SPY Normalized Stock Price",
+        xaxis_title="Date",
+        yaxis_title="Normalized Price"
+    )
+    return fig
 
-    # Fetch data
-    spy_data = vbt.YFData.download("SPY", start=start_date_tz, end=end_date_tz).get('Close')
-    spy_data_normalized = spy_data / spy_data.iloc[0] * 100  # Normalize
-    data = vbt.YFData.download(ticker, start=start_date_tz, end=end_date_tz).get('Close')
-    data_normalized = data / data.iloc[0] * 100  # Normalize
-
+def get_strategy_signals(data: pd.Series, strategy: str) -> Tuple[pd.Series, pd.Series]:
+    """Generate strategy signals."""
     if strategy == "SMA":
         short = vbt.MA.run(data, 50, short_name='fast')
         long = vbt.MA.run(data, 200, short_name='slow')
@@ -112,51 +70,105 @@ if backtest_clicked:
         rsi = vbt.RSI.run(data, 14)
         entries = rsi.rsi_below(30)
         exits = rsi.rsi_above(70)
- 
-    # Convert size to appropriate type
-    size_value = float(size) / 100.0
+    return entries, exits
 
-    # Run portfolio
-    portfolio = vbt.Portfolio.from_signals(
+def run_backtest(data: pd.Series, entries: pd.Series, exits: pd.Series, 
+                 size: float, fees: float, initial_equity: float) -> vbt.Portfolio:
+    """Execute backtest with given parameters."""
+    return vbt.Portfolio.from_signals(
         data, entries, exits,
         direction='longonly',
-        size=size_value,
+        size=size,
         size_type='percent',
         fees=fees/100,
         init_cash=initial_equity,
-        freq='1D',  
-        min_size =1,
-        size_granularity = 1
+        freq='1D',
+        min_size=1,
+        size_granularity=1
     )
 
-    # Run baseline
-    baseline = vbt.Portfolio.from_holding(spy_data, init_cash=initial_equity)
-    
-    # Plotting
-    equity_data = portfolio.value()
-    baseline_data = baseline.value()
-
-    # Equity Curve
-    e_fig = go.Figure()
-    e_fig.add_trace(go.Scatter(x=baseline_data.index, y=baseline_data, mode='lines', name='SPY'))
-    e_fig.add_trace(go.Scatter(x=equity_data.index, y=equity_data, mode='lines', name=strategy))
-  
-    e_fig.update_layout(title=f"{strategy} Equity Curve vs SPY Hold Baseline", 
-                        xaxis_title="Date", yaxis_title="Equity")
-    
-    # Historical Data
+def plot_equity_curves(portfolio_value: pd.Series, baseline_value: pd.Series, strategy: str) -> go.Figure:
+    """Create equity curve comparison chart."""
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=spy_data_normalized.index, 
-                             y=spy_data_normalized.values, mode='lines', name="SPY"))
-    fig.add_trace(go.Scatter(x=data_normalized.index, 
-                             y=data_normalized.values, mode='lines', name=ticker))
-
-    fig.update_layout(title=f"{ticker} vs SPY Normalized Stock Price", 
-                        xaxis_title="Date", 
-                        yaxis_title="Normalized Price")
+    fig.add_trace(go.Scatter(x=baseline_value.index, y=baseline_value, mode='lines', name='SPY'))
+    fig.add_trace(go.Scatter(x=portfolio_value.index, y=portfolio_value, mode='lines', name=strategy))
     
-    st.plotly_chart(fig, use_container_width=True)
-    st.plotly_chart(e_fig, use_container_width=True)
+    fig.update_layout(
+        title=f"{strategy} Equity Curve vs SPY Hold Baseline",
+        xaxis_title="Date",
+        yaxis_title="Equity"
+    )
+    return fig
+
+def main():
+    """Main application function."""
+    charts = st.empty()
+
+    # Initialize session state
+    if "data_fetched" not in st.session_state:
+        st.session_state.data_fetched = False
+
+    # Sidebar controls
+    with st.sidebar:
+        st.header("Historical")
+        ticker = st.text_input("Ticker", value=DEFAULT_TICKER)
+        start_date = st.date_input("Start Date", value=DEFAULT_START_DATE)
+        end_date = st.date_input("End Date", value=DEFAULT_END_DATE)
+        historical_clicked = st.button("Get Historical")
+
+        st.header("Backtest")
+        selected_label = st.selectbox("Strategy", list(STRATEGIES.keys()), index=2)
+        strategy = STRATEGIES[selected_label]["type"]
+        initial_equity = st.number_input("Initial Equity", value=DEFAULT_INITIAL_EQUITY)
+        size = st.text_input("Position %", value=DEFAULT_POSITION_SIZE)
+        fees = st.number_input("Fees (as %)", value=DEFAULT_FEES, format="%.4f")
+        backtest_clicked = st.button("Run Backtest")
+
+    # Handle historical data
+    if not st.session_state.data_fetched or historical_clicked:
+        start_date_tz = convert_to_timezone_aware(start_date)
+        end_date_tz = convert_to_timezone_aware(end_date)
+
+        spy_data = fetch_historical_data("SPY", start_date_tz, end_date_tz)
+        ticker_data = fetch_historical_data(ticker, start_date_tz, end_date_tz)
+
+        if spy_data is not None and ticker_data is not None:
+            spy_normalized = normalize_price_data(spy_data)
+            ticker_normalized = normalize_price_data(ticker_data)
+            
+            st.session_state.data_fetched = True
+            fig = plot_price_comparison(ticker_normalized, spy_normalized, ticker)
+            st.plotly_chart(fig, use_container_width=True)
+
+    # Handle backtest
+    if backtest_clicked:
+        start_date_tz = convert_to_timezone_aware(start_date)
+        end_date_tz = convert_to_timezone_aware(end_date)
+
+        # Fetch fresh data for backtest
+        data = fetch_historical_data(ticker, start_date_tz, end_date_tz)
+        spy_data = fetch_historical_data("SPY", start_date_tz, end_date_tz)
+
+        if data is not None and spy_data is not None:
+            # Generate signals and run portfolio
+            entries, exits = get_strategy_signals(data, strategy)
+            size_value = float(size) / 100.0
+            
+            portfolio = run_backtest(data, entries, exits, size_value, fees, initial_equity)
+            baseline = vbt.Portfolio.from_holding(spy_data, init_cash=initial_equity)
+
+            # Create and display charts
+            data_normalized = normalize_price_data(data)
+            spy_normalized = normalize_price_data(spy_data)
+            
+            price_fig = plot_price_comparison(data_normalized, spy_normalized, ticker)
+            equity_fig = plot_equity_curves(portfolio.value(), baseline.value(), strategy)
+            
+            st.plotly_chart(price_fig, use_container_width=True)
+            st.plotly_chart(equity_fig, use_container_width=True)
+
+if __name__ == "__main__":
+    main()
 
 
     
