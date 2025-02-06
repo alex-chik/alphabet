@@ -109,7 +109,9 @@ def main():
         st.header("Historical")
         ticker_options = ["ES=F", "NQ=F", "YM=F", "CL=F", "GC=F", "SI=F", "MNQ=F"]# You can add more ticker symbols as needed.
         ticker = st.selectbox("Ticker", options=ticker_options)
-        historical_clicked = st.button("Last 8 Days")
+        st.date_input("Start Date", datetime.now() - timedelta(days=8), disabled=True)
+        st.date_input("End Date", datetime.now(), disabled=True)
+        historical_clicked = st.button("Get Last 8 Days")
 
         st.header("Backtest")
         selected_label = st.selectbox("Strategy", list(STRATEGIES.keys()), index=2)
